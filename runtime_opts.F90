@@ -270,6 +270,7 @@ contains
    use metdata,             only: metdata_readnl
 #endif
    use radiation,           only: radiation_readnl
+   use climsim,             only: cbrain_readnl
 
 !---------------------------Arguments-----------------------------------
 
@@ -517,6 +518,9 @@ contains
 
    ! Read radiation namelist
    call radiation_readnl(nlfilename, dtime_in=dtime)
+
+   ! Read CLIMSIM namelist
+   call cbrain_readnl(nlfilename)
 
    ! Print cam_inparm input variables to standard output
    if (masterproc) then

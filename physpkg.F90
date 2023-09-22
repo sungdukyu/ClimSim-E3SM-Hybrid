@@ -47,11 +47,12 @@ module physpkg
   !-----------------------------------------------------------------------------
   ! Public methods
   !-----------------------------------------------------------------------------
-  public phys_register ! register physics methods
-  public phys_init     ! Public initialization method
-  public phys_run1     ! First phase of the public run method
-  public phys_run2     ! Second phase of the public run method
-  public phys_final    ! Public finalization method
+  public phys_register  ! register physics methods
+  public phys_init      ! Public initialization method
+  public phys_run1      ! First phase of the public run method
+  public phys_run2      ! Second phase of the public run method
+  public phys_final     ! Public finalization method
+  public climsim_driver ! CLIMSIM NN-emulation driver
   !-----------------------------------------------------------------------------
   ! Private module data
   !-----------------------------------------------------------------------------
@@ -692,6 +693,265 @@ end subroutine phys_init
 !===================================================================================================
 !===================================================================================================
 
+subroutine climsim_driver(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out)
+  !-----------------------------------------------------------------------------
+  ! Purpose: climsim driver
+  !-----------------------------------------------------------------------------
+  use climsim,          only: init_neural_net
+  use physics_buffer,   only: physics_buffer_desc, pbuf_get_chunk, pbuf_allocate
+  use time_manager,     only: get_nstep, get_step_size, & 
+                              is_first_step,  is_first_restart_step, &
+                              get_curr_calday
+  use cam_diagnostics,  only: diag_allocate
+  use radiation,        only: iradsw, use_rad_dt_cosz 
+  use radconstants,     only: nswbands, get_ref_solar_band_irrad
+  use rad_solar_var,    only: get_variability
+  use orbit,            only: zenith
+  use shr_orb_mod,      only: shr_orb_decl
+  use phys_grid,        only: get_rlat_all_p, get_rlon_all_p
+  use cam_control_mod,  only: lambm0, obliqr, eccen, mvelpp
+  use tropopause,       only: tropopause_output
+  use camsrfexch,       only: cam_export
+  use cam_diagnostics,  only: diag_export
+  !-----------------------------------------------------------------------------
+  ! Interface arguments
+  !-----------------------------------------------------------------------------
+  real(r8), intent(in) :: ztodt            ! physics time step unless nstep=0
+  type(physics_state), intent(inout), dimension(begchunk:endchunk) :: phys_state
+  type(physics_tend ), intent(inout), dimension(begchunk:endchunk) :: phys_tend
+
+  type(physics_buffer_desc), pointer, dimension(:,:)               :: pbuf2d
+  type(cam_in_t),                     dimension(begchunk:endchunk) :: cam_in
+  type(cam_out_t),                    dimension(begchunk:endchunk) :: cam_out
+
+  !-----------------------------------------------------------------------------
+  ! Local Variables
+  !-----------------------------------------------------------------------------
+  integer :: lchnk                             ! chunk identifier
+  integer :: ncol                              ! number of columns
+  integer :: nstep                             ! current timestep number
+  type(physics_buffer_desc), pointer :: phys_buffer_chunk(:)
+
+  ! stuff for calling crm_physics_tend
+  logical           :: use_ECPP
+  type(physics_ptend), dimension(begchunk:endchunk) :: ptend ! indivdual parameterization tendencies
+
+  integer  :: itim_old, cldo_idx, cld_idx   ! pbuf indices
+  real(r8), pointer, dimension(:,:) :: cld  ! cloud fraction
+  real(r8), pointer, dimension(:,:) :: cldo ! old cloud fraction
+  !-----------------------------------------------------------------------------
+
+  !-----------------------------------------------------------------------------
+  ! Local Variables (for CLIMSIM)
+  !-----------------------------------------------------------------------------
+  integer, save :: nstep0
+  integer       :: nstep_NN, dtime
+  type(physics_state), dimension(begchunk:endchunk) :: state_save
+  type(physics_tend ), dimension(begchunk:endchunk) :: tend_save
+  type(physics_buffer_desc), pointer, dimension(:,:) :: pbuf2d_save
+  ! type(cam_in_t),      dimension(begchunk:endchunk) :: cam_in_save ! does not change
+  type(cam_out_t),     dimension(begchunk:endchunk) :: cam_out_save
+  logical :: do_climsim_inference = .false.
+
+  real(r8) :: calday       ! current calendar day
+  real(r8) :: clat(pcols)  ! current latitudes(radians)
+  real(r8) :: clon(pcols)  ! current longitudes(radians)
+  real(r8), dimension(pcols,begchunk:endchunk) :: coszrs  ! Cosine solar zenith angle
+  real(r8), dimension(pcols,begchunk:endchunk) :: solin   ! Insolation
+
+  real(r8) :: sfac(1:nswbands)  ! time varying scaling factors due to Solar Spectral Irrad at 1 A.U. per band
+  real(r8) :: solar_band_irrad(1:nswbands) ! rrtmg-assumed solar irradiance in each sw band
+  real(r8) :: dt_avg = 0.0_r8   ! time step to use for the shr_orb_cosz calculation, if use_rad_dt_cosz set to true
+  real(r8) :: delta    ! Solar declination angle  in radians
+  real(r8) :: eccf     ! Earth orbit eccentricity factor
+!-----------------------------------------------------------------------------
+  ! phys_run1 opening
+  ! - phys_timestep_init advances ghg gases,
+  ! - need to advance solar insolation (for NN)
+  !-----------------------------------------------------------------------------
+
+  nstep = get_nstep()
+  dtime = get_step_size()
+
+  call pbuf_allocate(pbuf2d, 'physpkg')
+  call diag_allocate()
+
+  ! Advance time information
+  call t_startf ('phys_timestep_init')
+  call phys_timestep_init( phys_state, cam_out, pbuf2d)
+  call t_stopf ('phys_timestep_init')
+
+  ! Calculate  COSZRS and SOLIN
+  call get_ref_solar_band_irrad( solar_band_irrad ) ! this can move to init subroutine
+  call get_variability(sfac)                        ! "
+  do lchnk=begchunk,endchunk
+     ncol = phys_state(lchnk)%ncol
+     calday = get_curr_calday()
+     ! coszrs
+     call get_rlat_all_p(lchnk, ncol, clat)
+     call get_rlon_all_p(lchnk, ncol, clon)
+     if (use_rad_dt_cosz)  then
+        dtime  = get_step_size()
+        dt_avg = iradsw*dtime
+     end if
+     call zenith(calday, clat, clon, coszrs(:,lchnk), ncol, dt_avg)
+     ! solin
+     call shr_orb_decl(calday  ,eccen     ,mvelpp  ,lambm0  ,obliqr  , &
+                       delta   ,eccf      )
+     solin(:,lchnk) = sum(sfac(:)*solar_band_irrad(:)) * eccf * coszrs(:,lchnk)
+  end do
+
+  ! [TO-DO] Check solin and coszrs from this calculation vs. pbuf_XXX
+
+  !-----------------------------------------------------------------------------
+  ! phys_run1 main
+  !-----------------------------------------------------------------------------
+
+  ! Call init subroutine for neural networks
+  ! (loading neural network weights and normalization factors)
+  if (is_first_step() .or. is_first_restart_step()) then
+      call init_neural_net()
+     nstep0 = nstep
+  end if
+
+  ! Determine if MMF spin-up perioid is over
+  ! (currently spin up time is set at 86400 sec ~ 1 day)
+  ! [TO-DO] create a namelist variable for mmf spin-up time
+  nstep_NN = 86400 / get_step_size()
+  if (nstep-nstep0 .ge. nstep_NN) then
+     do_climsim_inference = .true.
+  end if
+
+#ifdef BRAINDEBUG
+  if (masterproc) then
+     write (iulog,*) '[BRAINDEBUG] nstep - nstep0, nstep_NN, do_climsim = ', nstep - nstep0, nstep_NN, do_climsim_inference
+  endif
+#endif
+
+  ! [TODO] This is for a partil coupling or a MMF-diagnostic mode.
+  ! ! Save original values of subroutine arguments
+  ! ! additional if check: do_MMF_diagnostics
+  ! if (do_climsim_inference) then
+  !    state_save   = phys_state
+  !    tend_save    = phys_tend
+  !    cam_out_save = cam_out
+  !    allocate(pbuf2d_save, source=pbuf2d)
+  ! endif
+
+  ! Run phys_run1 physics
+  if (.not. do_climsim_inference) then  ! MMFspin-up
+     call phys_run1(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out)
+  else  ! NN inference
+     ! state,tend,cam_out,pbuf2d = <...>_save
+     call phys_run1_NN(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out,&
+                       solin, coszrs)
+     do lchnk=begchunk, endchunk
+        call physics_update(phys_state(lchnk), ptend(lchnk), ztodt, phys_tend(lchnk))
+        ! call check_energy_chng
+     end do
+  end if
+
+  !-----------------------------------------------------------------------------
+  ! phys_run1 closing
+  ! - tphysbc2 diagnostic (including cam_export)
+  !-----------------------------------------------------------------------------
+  do lchnk=begchunk, endchunk
+     ! Diagnose the location of the tropopause
+     call tropopause_output(phys_state(lchnk))
+
+     ! Save atmospheric fields to force surface models
+     phys_buffer_chunk => pbuf_get_chunk(pbuf2d, lchnk)
+     call cam_export(phys_state(lchnk), cam_out(lchnk), phys_buffer_chunk)
+
+     ! Write export state to history file
+     call diag_export(cam_out(lchnk))
+  end do
+
+
+  ! [CLIMSIM] deallocate
+  ! if (do_climsim_inference) then
+  !   deallocate(pbuf2d_save)
+  ! end if
+
+end subroutine climsim_driver
+
+
+
+subroutine phys_run1_NN(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out, &
+                        solin, coszrs)
+  !-----------------------------------------------------------------------------
+  ! Purpose: First part of atmos physics before updating of surface components
+  !-----------------------------------------------------------------------------
+  use climsim,         only: neural_net, &
+                             cb_partial_coupling, cb_partial_coupling_vars
+  use physics_buffer,  only: physics_buffer_desc, pbuf_get_chunk
+  use time_manager,    only: get_nstep
+  use check_energy,    only: check_energy_gmean
+  use flux_avg,        only: flux_avg_init
+  !-----------------------------------------------------------------------------
+  ! Interface arguments
+  !-----------------------------------------------------------------------------
+  real(r8), intent(in) :: ztodt            ! physics time step unless nstep=0
+  type(physics_state), intent(inout), dimension(begchunk:endchunk) :: phys_state
+  type(physics_tend ), intent(inout), dimension(begchunk:endchunk) :: phys_tend
+
+  type(physics_buffer_desc), pointer, dimension(:,:) :: pbuf2d
+  type(cam_in_t),                     dimension(begchunk:endchunk) :: cam_in
+  type(cam_out_t),                    dimension(begchunk:endchunk) :: cam_out
+  real(r8), dimension(pcols,begchunk:endchunk) :: coszrs  ! Cosine solar zenith angle
+  real(r8), dimension(pcols,begchunk:endchunk) :: solin   ! Insolation
+
+  !-----------------------------------------------------------------------------
+  ! Local Variables
+  !-----------------------------------------------------------------------------
+  type(physics_buffer_desc),pointer, dimension(:)     :: phys_buffer_chunk
+  type(physics_ptend) :: ptend ! indivdual parameterization tendencies
+  integer :: lchnk                             ! chunk identifier
+  integer :: nstep                             ! current timestep number
+
+  !-----------------------------------------------------------------------------
+  ! phys_run1 opening
+  !-----------------------------------------------------------------------------
+  nstep = get_nstep()
+
+  ! The following initialization depends on the import state (cam_in)
+  ! being initialized.  This isn't true when cam_init is called, so need
+  ! to postpone this initialization to here.
+  if (nstep == 0 .and. phys_do_flux_avg()) call flux_avg_init(cam_in,  pbuf2d)
+
+  ! Compute total energy of input state and previous output state
+  call t_startf ('chk_en_gmean')
+  call check_energy_gmean(phys_state, pbuf2d, ztodt, nstep)
+  call t_stopf ('chk_en_gmean')
+
+#ifdef TRACER_CHECK
+  call gmean_mass ('before tphysbc DRY', phys_state)
+#endif
+
+  !-----------------------------------------------------------------------------
+  ! Neural network
+  !-----------------------------------------------------------------------------
+  do lchnk=begchunk, endchunk
+     phys_buffer_chunk => pbuf_get_chunk(pbuf2d, lchnk)
+     call neural_net (ptend, phys_state(lchnk), &
+                      phys_buffer_chunk, &
+                      cam_in(lchnk), cam_out(lchnk), &
+                      coszrs(:,lchnk), solin(:,lchnk), &
+                      ztodt)
+     call physics_update (phys_state(lchnk), ptend, ztodt, phys_tend(lchnk))
+  end do
+
+  !-----------------------------------------------------------------------------
+  ! phys_run1 closing
+  !-----------------------------------------------------------------------------
+#ifdef TRACER_CHECK
+  call gmean_mass ('between DRY', phys_state)
+#endif
+
+end subroutine phys_run1_NN
+
+
+
 subroutine phys_run1(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out)
   !-----------------------------------------------------------------------------
   ! Purpose: First part of atmos physics before updating of surface components
@@ -757,16 +1017,18 @@ subroutine phys_run1(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out)
   nstep = get_nstep()
 
   call phys_getopts( use_ECPP_out = use_ECPP )
-
+ 
   ! The following initialization depends on the import state (cam_in)
   ! being initialized.  This isn't true when cam_init is called, so need
   ! to postpone this initialization to here.
   if (nstep == 0 .and. phys_do_flux_avg()) call flux_avg_init(cam_in,  pbuf2d)
-
+ 
   ! Compute total energy of input state and previous output state
   call t_startf ('chk_en_gmean')
   call check_energy_gmean(phys_state, pbuf2d, ztodt, nstep)
   call t_stopf ('chk_en_gmean')
+
+#ifndef CLIMSIM
 
   call pbuf_allocate(pbuf2d, 'physpkg')
   call diag_allocate()
@@ -778,6 +1040,7 @@ subroutine phys_run1(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out)
   call t_startf ('phys_timestep_init')
   call phys_timestep_init( phys_state, cam_out, pbuf2d)
   call t_stopf ('phys_timestep_init')
+#endif
 
 #ifdef TRACER_CHECK
   call gmean_mass ('before tphysbc DRY', phys_state)
@@ -1871,10 +2134,12 @@ subroutine tphysbc2(ztodt, fsns, fsnt, flns, flnt, &
   !-----------------------------------------------------------------------------
   ! Diagnostics
   !-----------------------------------------------------------------------------
+
   call t_startf('tphysbc_diagnostics')
 
   if(do_aerocom_ind3) call cloud_top_aerocom(state, pbuf) 
 
+#ifndef CLIMSIM
   ! Diagnose the location of the tropopause
   call tropopause_output(state)
 
@@ -1883,6 +2148,7 @@ subroutine tphysbc2(ztodt, fsns, fsnt, flns, flnt, &
   
   ! Write export state to history file
   call diag_export(cam_out)
+#endif
 
   call check_tracers_fini(tracerint)
 

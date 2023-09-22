@@ -1,30 +1,28 @@
-#define CBRAIN
-#ifdef CBRAIN
-#define BRAINDEBUG
+#ifdef CLIMSIM
 !#define RHDEBUG
 !#define CBRAIN_OCN_ONLY
 
-module cloudbrain
+module climsim
 
 use constituents,    only: pcnst
 use shr_kind_mod,    only: r8 => shr_kind_r8
 use ppgrid,          only: pcols, pver, pverp
-use cam_history,         only: outfld, addfld, add_default
+use cam_history,     only: outfld, addfld, add_default
 use physconst,       only: gravit,cpair,latvap,latice
-use spmd_utils, only: masterproc,iam
-use camsrfexch,       only: cam_out_t, cam_in_t
+use spmd_utils,      only: masterproc,iam
+use camsrfexch,      only: cam_out_t, cam_in_t
 use constituents,    only: cnst_get_ind
-use physics_types,    only: physics_state,  physics_ptend, physics_ptend_init
-use cam_logfile,       only: iulog
-use physics_buffer,   only: physics_buffer_desc, pbuf_get_field, pbuf_get_index
+use physics_types,   only: physics_state,  physics_ptend, physics_ptend_init
+use cam_logfile,     only: iulog
+use physics_buffer,  only: physics_buffer_desc, pbuf_get_field, pbuf_get_index
 use cam_history_support, only: pflds, fieldname_lenp2
-use cam_abortutils, only: endrun
+use cam_abortutils,  only: endrun
+use string_utils,    only: to_lower
 
-! -------- NEURAL-FORTRAN --------
-! imports
-use mod_kinds, only: ik, rk
-use mod_network , only: network_type
-! --------------------------------
+!-------- NEURAL-FORTRAN (FKB) --------
+! use mod_kinds, only: ik, rk
+use mod_network, only: network_type
+!--------------------------------------
 
   implicit none
   save 
@@ -33,8 +31,8 @@ use mod_network , only: network_type
   ! Define variables for this entire module
   ! These are nameliest variables.
   ! If not specified in atm_in, the following defaults values are used.
-  integer :: inputlength  = 108     ! length of NN input vector
-  integer :: outputlength = 112     ! length of NN output vector
+  integer :: inputlength  = 425     ! length of NN input vector
+  integer :: outputlength = 368     ! length of NN output vector
   logical :: input_rh     = .false.  ! toggle to switch from q --> RH input
   logical :: cb_use_input_prectm1 = .false.  ! use previous timestep PRECT for input variable 
   character(len=256)    :: cb_fkb_model   ! absolute filepath for a fkb model txt file
@@ -44,17 +42,20 @@ use mod_network , only: network_type
   logical :: cb_partial_coupling  = .false.
   character(len=fieldname_lenp2) :: cb_partial_coupling_vars(pflds)
 
+  character(len=256) :: cb_nn_var_combo = 'v2'
+
   type(network_type), allocatable :: cloudbrain_net(:)
   real(r8), allocatable :: inp_sub(:)
   real(r8), allocatable :: inp_div(:)
   real(r8), allocatable :: out_scale(:)
 
-  logical :: cb_do_ensemble  = .false.
-  integer :: cb_ens_size
+  logical :: cb_do_ensemble  = .false. ! ensemble model inference
+  integer :: cb_ens_size               ! # of ensemble models
   integer :: max_nn_ens = 100 ! Max. ensemble size is arbitrarily set to 100.
-  character(len=256), allocatable :: cb_ens_fkb_model_list(:)
+  character(len=256), allocatable :: cb_ens_fkb_model_list(:) ! absolute filepath for models
 
-  integer :: cb_random_ens_size = 0
+  integer :: cb_random_ens_size = 0 ! For stochastic ensemble,
+                                    ! # of ensemble subset to be averaged
 
   ! local
   integer, allocatable :: ens_ind_shuffled(:)
@@ -65,113 +66,154 @@ use mod_network , only: network_type
   
 contains
 
-  subroutine neural_net (state,nn_solin,cam_in,ztodt,ptend,cam_out,pbuf)
+  subroutine neural_net (ptend, state, pbuf, cam_in, cam_out, coszrs, solin, ztodt)
  ! note state is meant to have the "BP" state saved earlier. 
 
    implicit none
 
+   type(physics_ptend),intent(out)    :: ptend 
    type(physics_state), intent(in)    :: state
-   real(r8), intent(in)               :: nn_solin(pcols) 
+   type(physics_buffer_desc), pointer :: pbuf(:)  ! SY: for precip variables.
    type(cam_in_t),intent(in)          :: cam_in
-   real(r8), intent(in) :: ztodt 
-   type(physics_ptend),intent(out)    :: ptend            ! indivdual parameterization tendencies
    type(cam_out_t),     intent(inout) :: cam_out  ! SY: changed to inout to use variables from a previous time step (e.g., PRECT)
-   type(physics_buffer_desc), pointer  :: pbuf(:) ! SY: for precip variables.
+   real(r8), intent(in)               :: coszrs(pcols)
+   real(r8), intent(in)               :: solin(pcols)
+   real(r8), intent(in)               :: ztodt
 
    ! SY: for random ensemble averaging
    integer, external :: shuffled_1d 
 
-    ! local variables
+   ! local variables
    real(r8) :: input(pcols,inputlength)
    real(r8) :: output(pcols,outputlength)
-   integer :: i,k,ncol,ixcldice,ixcldliq,ii,kk,klev_crmtop,kens
+   integer :: i,k,ncol,ixcldice,ixcldliq,ii,kk,idx_trop,kens
    real (r8) :: s_bctend(pcols,pver), q_bctend(pcols,pver), qc_bctend(pcols,pver), qi_bctend(pcols,pver), qafter, safter
-   logical :: doconstraints
-   logical ::  lq(pcnst)
-   real(r8) :: rh_loc
-   integer :: pvert,ntrim
+   logical :: do_constraints
+   logical :: lq(pcnst)
+   real(r8) ::rh_loc
    integer :: prec_dp_idx, snow_dp_idx
    ! convective precipitation variables
    real(r8), pointer :: prec_dp(:)                ! total precip rate [m/s]
    real(r8), pointer :: snow_dp(:)                ! snow precip rate [m/s]
 
-   ntrim = 0 !sungduk: cam_nz=26, crm_nz=24, However, NN input variable has nz=26.
-   pvert = pver-ntrim ! after trimming.
+   real(r8), pointer, dimension(:)   :: lhflx, shflx, taux, tauy ! (/pcols/)
+   real(r8), pointer, dimension(:,:) :: ozone, ch4, n2o ! (/pcols,pver/)
 
    ncol  = state%ncol
    call cnst_get_ind('CLDLIQ', ixcldliq)
    call cnst_get_ind('CLDICE', ixcldice)
    lq(:)        = .FALSE.
-   lq(1) = .TRUE.
-   lq(ixcldliq) = .TRUE.
-   lq(ixcldice) = .TRUE.
+   lq(1)        = .TRUE. ! water vapor
+   lq(ixcldliq) = .TRUE. ! cloud liquid
+   lq(ixcldice) = .TRUE. ! cloud ice
    call physics_ptend_init(ptend, state%psetcols, 'neural-net', ls=.true.,lq=lq)   ! Initialize local physics_ptend object
 
-   doconstraints = .true.
+   do_constraints = .true.
    
    s_bctend(:,:) = 0.
    q_bctend(:,:) = 0.
    qc_bctend(:,:) = 0.
    qi_bctend(:,:) = 0.
- 
-  ! Ankitesh says on Slack that ['QBP','TBP','CLDLIQBP','CLDICEBP','PS', 'SOLIN', 'SHFLX', 'LHFLX']
-  ! Gunnar's ANN (2022DEC)
-  ! INPUT: ['QBP', 'TBP','PS', 'SOLIN', 'SHFLX','LHFLX','PRECTt-dt','CLDLIQBP','CLDICEBP']
-  ! Gunnar's ANN (2023FEB)
-  ! INPUT: ['QBP', 'TBP','PS', 'SOLIN', 'SHFLX', 'LHFLX','CLDLIQBP','CLDICEBP']
-    if (input_rh) then
-       do i = 1,ncol
-         do k=ntrim+1,pver
-           ! Port of tom's RH =  Rv*p*qv/(R*esat(T))
-           rh_loc = 461.*state%pmid(i,k)*state%q(i,k,1)/(287.*tom_esat(state%t(i,k))) ! note function tom_esat below refercing SAM's sat.F90
-#ifdef RHDEBUG
-           if (masterproc) then
-             write (iulog,*) 'RHDEBUG:p,q,T,RH=',state%pmid(i,k),state%q(i,k,1),state%t(i,k),rh_loc
-           endif
-#endif
-           input(i,k-ntrim) = rh_loc
-         end do
-       end do
-    else
-      do i=1,ncol 
-        do k=ntrim+1,pver
-          input(i,k-ntrim) = state%q(i,k,1) ! specific humidity input
-        end do
-      end do
-    endif
-    input(:ncol,(pvert+1):(2*pvert))     = state%t(:ncol,(ntrim+1):pver) ! TBP
-    input(:ncol,(2*pvert+1))             = state%ps(:ncol) ! PS
-    input(:ncol,(2*pvert+2))             = nn_solin(:ncol) ! SOLIN / WARNING this is being lazily mined from part of SP solution... should be avoidable in future when bypassing SP totally but will take work.
-    input(:ncol,(2*pvert+3))             = cam_in%shf(:ncol) ! SHFLX
-    input(:ncol,(2*pvert+4))             = cam_in%lhf(:ncol) ! LHFLX
-    input(:ncol,(2*pvert+5):(3*pvert+4)) = state%q(:ncol,(ntrim+1):pver,ixcldliq) ! CLDLIQBP
-    input(:ncol,(3*pvert+5):(4*pvert+4)) = state%q(:ncol,(ntrim+1):pver,ixcldice) ! CLDICEBP
-    if (cb_use_input_prectm1) then
-       input(:ncol,(2*pvert+5))             = cam_out%precc(:ncol)  + cam_out%precl(:ncol) ! PRECTt-dt
-       input(:ncol,(2*pvert+6):(3*pvert+5)) = state%q(:ncol,(ntrim+1):pver,ixcldliq) ! CLDLIQBP
-       input(:ncol,(3*pvert+6):(4*pvert+5)) = state%q(:ncol,(ntrim+1):pver,ixcldice) ! CLDICEBP
-    else
-       input(:ncol,(2*pvert+5):(3*pvert+4)) = state%q(:ncol,(ntrim+1):pver,ixcldliq) ! CLDLIQBP
-       input(:ncol,(3*pvert+5):(4*pvert+4)) = state%q(:ncol,(ntrim+1):pver,ixcldice) ! CLDICEBP
-    endif
 
+   ! Associate pointers with pbuf fields
+   call pbuf_get_field(pbuf, pbuf_get_index('LHFLX'), lhflx)
+   call pbuf_get_field(pbuf, pbuf_get_index('SHFLX'), shflx)
+   call pbuf_get_field(pbuf, pbuf_get_index('TAUX'),  taux)
+   call pbuf_get_field(pbuf, pbuf_get_index('TAUY'),  tauy)
+   call pbuf_get_field(pbuf, pbuf_get_index('ozone'), ozone)
+   call pbuf_get_field(pbuf, pbuf_get_index('CH4'),   ch4)
+   call pbuf_get_field(pbuf, pbuf_get_index('N2O'),   n2o)
+
+! v2 input variables:
+! ['state_t', 'state_q0001', 'state_q0002', 'state_q0003', 'state_u', 'state_v', 'state_ps', 'pbuf_SOLIN', 'pbuf_LHFLX', 'pbuf_SHFLX', 'pbuf_TAUX', 'pbuf_TAUY', 'pbuf_COSZRS', 'cam_in_ALDIF', 'cam_in_ALDIR', 'cam_in_ASDIF', 'cam_in_ASDIR', 'cam_in_LWUP', 'cam_in_ICEFRAC', 'cam_in_LANDFRAC', 'cam_in_OCNFRAC', 'cam_in_SNOWHICE', 'cam_in_SNOWHLAND', 'pbuf_ozone', 'pbuf_CH4', 'pbuf_N2O']
+! v2 output variables:
+! ['ptend_t', 'ptend_q0001', 'ptend_q0002', 'ptend_q0003', 'ptend_u', 'ptend_v', 'cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
+
+select case (to_lower(trim(cb_nn_var_combo)))
+   case('v2')
+      input(:ncol,0*pver+1:1*pver) = state%t(1:ncol,1:pver)          ! state_t
+      input(:ncol,1*pver+1:2*pver) = state%q(1:ncol,1:pver,1)        ! state_q0001
+      input(:ncol,2*pver+1:3*pver) = state%q(1:ncol,1:pver,ixcldliq) ! state_q0002
+      input(:ncol,3*pver+1:4*pver) = state%q(1:ncol,1:pver,ixcldice) ! state_q0003
+      input(:ncol,4*pver+1:5*pver) = state%u(1:ncol,1:pver)          ! state_u
+      input(:ncol,5*pver+1:6*pver) = state%v(1:ncol,1:pver)          ! state_v
+      input(:ncol,6*pver+1       ) = state%ps(1:ncol)                ! state_ps
+      input(:ncol,6*pver+2       ) = solin(1:ncol)                   ! pbuf_SOLIN
+      input(:ncol,6*pver+3       ) = lhflx(1:ncol)                   ! pbuf_LHFLX
+      input(:ncol,6*pver+4       ) = shflx(1:ncol)                   ! pbuf_SHFLX
+      input(:ncol,6*pver+5       ) = taux(1:ncol)                    ! pbuf_TAUX
+      input(:ncol,6*pver+6       ) = tauy(1:ncol)                    ! pbuf_TAUY
+      input(:ncol,6*pver+7       ) = coszrs(1:ncol)                  ! pbuf_COSZRS
+      input(:ncol,6*pver+8       ) = cam_in%ALDIF(:ncol)             ! cam_in_ALDIF 
+      input(:ncol,6*pver+9       ) = cam_in%ALDIR(:ncol)             ! cam_in_ALDIR 
+      input(:ncol,6*pver+10      ) = cam_in%ASDIF(:ncol)             ! cam_in_ASDIF 
+      input(:ncol,6*pver+11      ) = cam_in%ASDIR(:ncol)             ! cam_in_ASDIR
+      input(:ncol,6*pver+12      ) = cam_in%LWUP(:ncol)              ! cam_in_LWUP
+      input(:ncol,6*pver+13      ) = cam_in%ICEFRAC(:ncol)           ! cam_in_ICEFRAC
+      input(:ncol,6*pver+14      ) = cam_in%LANDFRAC(:ncol)          ! cam_in_LANDFRAC
+      input(:ncol,6*pver+15      ) = cam_in%OCNFRAC(:ncol)           ! cam_in_OCNFRAC
+      input(:ncol,6*pver+16      ) = cam_in%SNOWHICE(:ncol)          ! cam_in_SNOWHICE
+      input(:ncol,6*pver+17      ) = cam_in%SNOWHLAND(:ncol)         ! cam_in_SNOWHLAND
+      input(:ncol,6*pver+18:6*pver+33) = ozone(:ncol,6:21)           ! pbuf_ozone
+      input(:ncol,6*pver+34:6*pver+49) = ch4(:ncol,6:21)             ! pbuf_CH4
+      input(:ncol,6*pver+50:6*pver+65) = n2o(:ncol,6:21)             ! pbuf_N2O
+
+      ! RH conversion
+      if (input_rh) then ! relative humidity conversion for input
+         do i = 1,ncol
+           do k=1,pver
+             ! Port of tom's RH =  Rv*p*qv/(R*esat(T))
+             rh_loc = 461.*state%pmid(i,k)*state%q(i,k,1)/(287.*tom_esat(state%t(i,k))) ! note function tom_esat below refercing SAM's sat.F90
+#ifdef RHDEBUG
+             if (masterproc) then
+               write (iulog,*) 'RHDEBUG:p,q,T,RH=',state%pmid(i,k),state%q(i,k,1),state%t(i,k),rh_loc
+             endif
+#endif
+             input(i,1*pver+k) = rh_loc
+           end do
+         end do
+      end if
+
+end select
 
 ! Tue Jan 24 13:28:43 CST 2023
 ! Sungduk 
 #ifdef BRAINDEBUG
-      if (masterproc) then
-        write (iulog,*) 'BRAINDEBUG TBP=',state%t(1,(ntrim+1):pver)
-        write (iulog,*) 'BRAINDEBUG PS=',state%ps(1)
-        write (iulog,*) 'BRAINDEBUG SOLIN=',nn_solin(1)
-        write (iulog,*) 'BRAINDEBUG SHFLX=',cam_in%shf(1)
-        write (iulog,*) 'BRAINDEBUG LHFLX=',cam_in%lhf(1)
-        if (cb_use_input_prectm1) then
-          write (iulog,*) 'BRAINDEBUG PRECTm1=',cam_out%precc(1) + cam_out%precl(1)
-        endif
-        write (iulog,*) 'BRAINDEBUG CLDLIQBP=', state%q(1,(ntrim+1):pver,ixcldliq)
-        write (iulog,*) 'BRAINDEBUG CLDICEBP=', state%q(1,(ntrim+1):pver,ixcldice)
-      endif
-#endif# 
+if (masterproc) then ! (logging ncol=1 only)
+select case (to_lower(trim(cb_nn_var_combo)))
+   case('v2')
+      write (iulog,*) 'BRAINDEBUG state_t = ', state%t(1:ncol,1:pver)          ! state_t
+      write (iulog,*) 'BRAINDEBUG state_q0001 = ', state%q(1:ncol,1:pver,1)        ! state_q0001
+      write (iulog,*) 'BRAINDEBUG state_q0002 = ', state%q(1:ncol,1:pver,ixcldliq) ! state_q0002
+      write (iulog,*) 'BRAINDEBUG state_q0003 = ', state%q(1:ncol,1:pver,ixcldice) ! state_q0003
+      write (iulog,*) 'BRAINDEBUG state_u = ', state%u(1:ncol,1:pver)          ! state_u
+      write (iulog,*) 'BRAINDEBUG state_v = ', state%v(1:ncol,1:pver)          ! state_v
+      write (iulog,*) 'BRAINDEBUG state_ps = ', state%ps(1:ncol)                ! state_ps
+      write (iulog,*) 'BRAINDEBUG pbuf_SOLIN = ', solin(1:ncol)                   ! pbuf_SOLIN
+      write (iulog,*) 'BRAINDEBUG pbuf_LHFLX = ', lhflx(1:ncol)                   ! pbuf_LHFLX
+      write (iulog,*) 'BRAINDEBUG pbuf_SHFLX = ', shflx(1:ncol)                   ! pbuf_SHFLX
+      write (iulog,*) 'BRAINDEBUG pbuf_TAUX = ', taux(1:ncol)                    ! pbuf_TAUX
+      write (iulog,*) 'BRAINDEBUG pbuf_TAUY = ', tauy(1:ncol)                    ! pbuf_TAUY
+      write (iulog,*) 'BRAINDEBUG pbuf_COSZRS = ', coszrs(1:ncol)                  ! pbuf_COSZRS
+      write (iulog,*) 'BRAINDEBUG cam_in_ALDIF = ', cam_in%ALDIF(:ncol)             ! cam_in_ALDIF
+      write (iulog,*) 'BRAINDEBUG cam_in_ALDIR = ', cam_in%ALDIR(:ncol)             ! cam_in_ALDIR
+      write (iulog,*) 'BRAINDEBUG cam_in_ASDIF = ', cam_in%ASDIF(:ncol)             ! cam_in_ASDIF
+      write (iulog,*) 'BRAINDEBUG cam_in_ASDIR = ', cam_in%ASDIR(:ncol)             ! cam_in_ASDIR
+      write (iulog,*) 'BRAINDEBUG cam_in_LWUP = ', cam_in%LWUP(:ncol)              ! cam_in_LWUP
+      write (iulog,*) 'BRAINDEBUG cam_in_ICEFRAC = ', cam_in%ICEFRAC(:ncol)           ! cam_in_ICEFRAC
+      write (iulog,*) 'BRAINDEBUG cam_in_LANDFRAC = ', cam_in%LANDFRAC(:ncol)          ! cam_in_LANDFRAC
+      write (iulog,*) 'BRAINDEBUG cam_in_OCNFRAC = ', cam_in%OCNFRAC(:ncol)           ! cam_in_OCNFRAC
+      write (iulog,*) 'BRAINDEBUG cam_in_SNOWHICE = ', cam_in%SNOWHICE(:ncol)          ! cam_in_SNOWHICE
+      write (iulog,*) 'BRAINDEBUG cam_in_SNOWHLAND = ', cam_in%SNOWHLAND(:ncol)         ! cam_in_SNOWHLAND
+      write (iulog,*) 'BRAINDEBUG pbuf_ozone = ', ozone(:ncol,6:21)           ! pbuf_ozone
+      write (iulog,*) 'BRAINDEBUG pbuf_CH4 = ', ch4(:ncol,6:21)             ! pbuf_CH4
+      write (iulog,*) 'BRAINDEBUG pbuf_N2O = ', n2o(:ncol,6:21)             ! pbuf_N2O
+      if (input_rh) then ! relative humidity conversion for input
+         write (iulog,*) 'BRAINDEBUG RH = ', input(:ncol,1*pver+1:2*pver) ! relhum 
+      end if
+end select
+end if
+#endif 
 
 #ifdef BRAINDEBUG
       if (masterproc) then
@@ -221,11 +263,14 @@ contains
 #endif
 
    ! Manually applying ReLU activation for positive-definite variables
+   ! [TODO] for ensemble, ReLU should be moved before ens-averaging
    do i=1,ncol
-     do k=4*pvert+1,4*pvert+8
+     ! ReLU for the last 8 variables (true for 'v1' and 'v2')
+     do k=outputlength-7,outputlength
        output(i,k) = max(output(i,k), 0.)
      end do
-     k=4*pvert+3
+     ! tiny flwds
+     k=4*pver+3
      output(i,k) = max(output(i,k), tiny(output(i,k))) ! flwds
                                                        ! preventing flwds==0 error
    end do
@@ -247,32 +292,30 @@ contains
       endif
 #endif
 
-! OUTPUT:
-! ['QBCTEND','TBCTEND','CLDLIQBCTEND','CLDICEBCTEND','PREC_CRM_SNOW','PREC_CRM','NN2L_FLWDS','NN2L_DOWN_SW','NN2L_SOLL','NN2L_SOLLD','NN2L_SOLS','NN2L_SOLSD']
-
 ! ---------- 1. NN output to atmosphere forcing --------
-! ['QBCTEND','TBCTEND','CLDLIQBCTEND','CLDICEBCTEND']
-! ! don't use CRM tendencies from two crm top levels
-   q_bctend (:ncol,ntrim+1:pver) = output(:ncol,1:pvert) ! kg/kg/s 
-   s_bctend (:ncol,ntrim+1:pver) = output(:ncol,(pvert+1)  :(2*pvert))*cpair ! K/s --> J/kg/s (ptend expects that)
-   qc_bctend(:ncol,ntrim+1:pver) = output(:ncol,(2*pvert+1):(3*pvert)) ! kg/kg/s 
-   qi_bctend(:ncol,ntrim+1:pver) = output(:ncol,(3*pvert+1):(4*pvert)) ! kg/kg/s 
+! ['TBCTEND', 'QBCTEND','CLDLIQBCTEND','CLDICEBCTEND']
+   s_bctend (:ncol,1:pver) = output(1:ncol,0*pver+1:1*pver)*cpair ! K/s --> J/kg/s (ptend expects that)
+   q_bctend (:ncol,1:pver) = output(1:ncol,1*pver+1:2*pver)       ! kg/kg/s 
+   qc_bctend(:ncol,1:pver) = output(1:ncol,2*pver+1:3*pver)       ! kg/kg/s 
+   qi_bctend(:ncol,1:pver) = output(1:ncol,3*pver+1:4*pver)       ! kg/kg/s 
 
 ! deny any moisture activity in the stratosphere:
    do i=1,ncol
-     call detect_tropopause(state%t(i,:),state%exner(i,:),state%zm(i,:),state%pmid(i,:),klev_crmtop)
-     q_bctend(i,1:klev_crmtop) = 0.
-     qc_bctend(i,1:klev_crmtop) = 0.
-     qi_bctend(i,1:klev_crmtop) = 0.
+     call detect_tropopause(state%t(i,:),state%exner(i,:),state%zm(i,:),state%pmid(i,:),idx_trop)
+     q_bctend(i,1:idx_trop) = 0.
+     qc_bctend(i,1:idx_trop) = 0.
+     qi_bctend(i,1:idx_trop) = 0.
    end do
+
 ! -- atmos positivity constraints ---- 
-   if (doconstraints) then
+   if (do_constraints) then
    do i=1,ncol
      do k=1,pver
 ! deny activity in the ice phase where it is above freezing.
        if (state%t(i,k) .gt. 273.16) then
           qi_bctend(i,k) = 0.
 ! deny activitiy in the water phase where it is below freezing.
+! (253.16K: the lowest threshold temperature for supercooled cloud water to form)
        elseif (state%t(i,k) .lt. 253.16) then
           qc_bctend(i,k) = 0.
        end if
@@ -290,7 +333,6 @@ contains
        if (qafter .lt. 0.) then ! can only happen when qbctend < 0...
          q_bctend(i,k) = q_bctend(i,k) + abs(qafter)/ztodt ! in which case reduce drying rate
        endif
-
 
  ! liquid positivity:
        qafter = state%q(i,k,ixcldliq) + qc_bctend(i,k)*ztodt ! predicted liquid after NN tendency
@@ -325,36 +367,30 @@ contains
 !!!    cam_out%sols  = output(:ncol,4*pvert+7)
 !!!    cam_out%solsd = output(:ncol,4*pvert+8)
 !!! 
-!!!    ! These are the cam_out members that are assigned in cam_export,
+!!!    ! These are the cam_out members that are assigned in cam_export: prec_dp, snow_dp,
 !!!    ! and so saved to pbuf, instead.
-!!!    ! SY: Note that this uses SPCAM's pbuf register.
-!!!    !     Once, SP is entirely removed, we still need to call crm_physics_register().
-!!!    prec_dp_idx = pbuf_get_index('PREC_DP', errcode=i) ! Query physics buffer index
-!!!    snow_dp_idx = pbuf_get_index('SNOW_DP', errcode=i)
-!!!    call pbuf_get_field(pbuf, prec_dp_idx, prec_dp) ! Associate pointers withphysics buffer fields
-!!!    call pbuf_get_field(pbuf, snow_dp_idx, snow_dp)
-!!!    prec_dp(:ncol) = output(:ncol,4*pvert+2)   ! PREC_CRM
-!!!    snow_dp(:ncol) = output(:ncol,4*pvert+1)   ! PREC_CRM_SNOW
+!!!    ! SY: Note that this uses SPCAM's or CAM's pbuf register: crm_physics_register(), convect_deep_register()
+!!!    !     Once, SP is entirely removed, cam_out%prec{c,l,sc,sl} should be directly updated here.
 
    prec_dp_idx = pbuf_get_index('PREC_DP', errcode=i) ! Query physics buffer index
    snow_dp_idx = pbuf_get_index('SNOW_DP', errcode=i)
    call pbuf_get_field(pbuf, prec_dp_idx, prec_dp) ! Associate pointers withphysics buffer fields
    call pbuf_get_field(pbuf, snow_dp_idx, snow_dp)
+
    do i = 1,ncol
 ! SY: debugging
 !     allowing surface coupling over ocean only
 #ifdef CBRAIN_OCN_ONLY 
      if (cam_in%ocnfrac(i) .eq. 1.0_r8) then
 #endif
-       cam_out%flwds(i) = output(i,4*pvert+3)
-       cam_out%netsw(i) = output(i,4*pvert+4)
-       cam_out%soll(i)  = output(i,4*pvert+5)
-       cam_out%solld(i) = output(i,4*pvert+6)
-       cam_out%sols(i)  = output(i,4*pvert+7)
-       cam_out%solsd(i) = output(i,4*pvert+8)
-
-       prec_dp(i) = output(i,4*pvert+2)   ! PREC_CRM
-       snow_dp(i) = output(i,4*pvert+1)   ! PREC_CRM_SNOW
+       cam_out%netsw(i) = output(i,6*pver+1)
+       cam_out%flwds(i) = output(i,6*pver+2)
+       snow_dp(i)       = output(i,6*pver+3)
+       prec_dp(i)       = output(i,6*pver+4)
+       cam_out%sols(i)  = output(i,6*pver+5)
+       cam_out%soll(i)  = output(i,6*pver+6)
+       cam_out%solsd(i) = output(i,6*pver+7)
+       cam_out%solld(i) = output(i,6*pver+8)
 #ifdef CBRAIN_OCN_ONLY
      end if
 #endif
@@ -398,28 +434,30 @@ end subroutine neural_net
     else
        allocate(cloudbrain_net (1))
        call cloudbrain_net(1) %load(cb_fkb_model)
-       write (iulog,*) 'CLOUDBRAIN: loaded network from txt file, ', trim(cb_fkb_model)
+       if (masterproc) then
+          write (iulog,*) 'CLOUDBRAIN: loaded network from txt file, ', trim(cb_fkb_model)
+       endif
     endif
 
     open (unit=555,file=cb_inp_sub,status='old',action='read')
     read(555,*) inp_sub(:)
     close (555)
     if (masterproc) then
-       write (iulog,*) 'CLOUDBRAIN: loaded inp_sub.txt, ', trim(cb_inp_sub)
+       write (iulog,*) 'CLOUDBRAIN: loaded input subtraction factors from: ', trim(cb_inp_sub)
     endif
 
     open (unit=555,file=cb_inp_div,status='old',action='read')
     read(555,*) inp_div(:)
     close (555)
     if (masterproc) then
-       write (iulog,*) 'CLOUDBRAIN: loaded inp_div.txt, ', trim(cb_inp_div)
+       write (iulog,*) 'CLOUDBRAIN: loaded input division factors from: ', trim(cb_inp_div)
     endif
 
     open (unit=555,file=cb_out_scale,status='old',action='read')
     read(555,*) out_scale(:)
     close (555)
     if (masterproc) then
-       write (iulog,*) 'CLOUDBRAIN: loaded out_scale.txt, ', trim(cb_out_scale)
+       write (iulog,*) 'CLOUDBRAIN: loaded output scale factors from: ', trim(cb_out_scale)
     endif
 
 #ifdef BRAINDEBUG
@@ -537,7 +575,8 @@ end subroutine neural_net
                            cb_partial_coupling, cb_partial_coupling_vars,&
                            cb_use_input_prectm1, &
                            cb_do_ensemble, cb_ens_size, cb_ens_fkb_model_list, &
-                           cb_random_ens_size
+                           cb_random_ens_size, &
+                           cb_nn_var_combo
 
       ! Initialize 'cb_partial_coupling_vars'
       do f = 1, pflds
@@ -576,14 +615,16 @@ end subroutine neural_net
       call mpibcast(cb_inp_div,   len(cb_inp_div),   mpichar, 0, mpicom)
       call mpibcast(cb_out_scale, len(cb_out_scale), mpichar, 0, mpicom)
       call mpibcast(cb_partial_coupling, 1,          mpilog,  0, mpicom)
-      call mpibcast(cb_partial_coupling_vars, len(cb_partial_coupling_vars(1))*pflds, mpichar, 0, mpicom, ierr)
+      call mpibcast(cb_partial_coupling_vars, len(cb_partial_coupling_vars(1))*pflds, mpichar, 0, mpicom)
       call mpibcast(cb_do_ensemble, 1,               mpilog,  0, mpicom)
       call mpibcast(cb_ens_size,    1,               mpiint,  0, mpicom)
-      call mpibcast(cb_ens_fkb_model_list,    len(cb_ens_fkb_model_list(1))*max_nn_ens, mpichar, 0, mpicom, ierr)
+      call mpibcast(cb_ens_fkb_model_list,    len(cb_ens_fkb_model_list(1))*max_nn_ens, mpichar, 0, mpicom)
       call mpibcast(cb_random_ens_size,    1,        mpiint,  0, mpicom)
-      if (ierr /= 0) then
-         call endrun(subname // ':: ERROR broadcasting namelist variable cb_partial_coupling_vars')
-      end if
+      call mpibcast(cb_nn_var_combo, len(cb_nn_var_combo), mpichar,  0, mpicom)
+      ! [TODO] check ierr for each mpibcast call
+      ! if (ierr /= 0) then
+      !    call endrun(subname // ':: ERROR broadcasting namelist variable cb_partial_coupling_vars')
+      ! end if
 #endif
 
    end subroutine cbrain_readnl
@@ -611,5 +652,5 @@ end subroutine neural_net
     end do
   end function shuffle_1d
 
-end module cloudbrain
+end module climsim
 #endif
