@@ -884,7 +884,7 @@ subroutine phys_run1_NN(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out, 
   !-----------------------------------------------------------------------------
   use climsim,         only: neural_net, &
                              cb_partial_coupling, cb_partial_coupling_vars
-  use physics_buffer,  only: physics_buffer_desc, pbuf_get_chunk
+  use physics_buffer,  only: physics_buffer_desc, pbuf_get_chunk, pbuf_get_field
   use time_manager,    only: get_nstep
   use check_energy,    only: check_energy_gmean
   use flux_avg,        only: flux_avg_init
@@ -904,10 +904,23 @@ subroutine phys_run1_NN(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out, 
   !-----------------------------------------------------------------------------
   ! Local Variables
   !-----------------------------------------------------------------------------
-  type(physics_buffer_desc),pointer, dimension(:)     :: phys_buffer_chunk
-  type(physics_ptend) :: ptend ! indivdual parameterization tendencies
+  type(physics_state)                              :: state
+  type(physics_buffer_desc),pointer, dimension(:)  :: phys_buffer_chunk
+  type(physics_ptend)                              :: ptend 
   integer :: lchnk                             ! chunk identifier
   integer :: nstep                             ! current timestep number
+  integer :: ncol
+  integer :: ixcldice, ixcldliq            ! constituent indices for cloud liquid and ice water.
+  real(r8), pointer, dimension(:,:) :: tini
+  real(r8), pointer, dimension(:,:) :: qini
+  real(r8), pointer, dimension(:,:) :: cldliqini
+  real(r8), pointer, dimension(:,:) :: cldiceini
+  
+  nullify(phys_buffer_chunk)
+  nullify(tini)
+  nullify(qini)
+  nullify(cldliqini)
+  nullify(cldiceini)
 
   !-----------------------------------------------------------------------------
   ! phys_run1 opening
@@ -927,6 +940,24 @@ subroutine phys_run1_NN(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out, 
 #ifdef TRACER_CHECK
   call gmean_mass ('before tphysbc DRY', phys_state)
 #endif
+
+  ! these initial states will be used in tphysac diagnostics
+  do lchnk=begchunk, endchunk
+     state = phys_state(lchnk)
+     phys_buffer_chunk => pbuf_get_chunk(pbuf2d, lchnk)
+     call pbuf_get_field(phys_buffer_chunk, tini_idx, tini)
+     call pbuf_get_field(phys_buffer_chunk, qini_idx, qini)
+     call pbuf_get_field(phys_buffer_chunk, cldliqini_idx, cldliqini)
+     call pbuf_get_field(phys_buffer_chunk, cldiceini_idx, cldiceini)
+
+     ncol = phys_state(lchnk)%ncol
+     tini(:ncol,:pver) = state%t(:ncol,:pver)
+     call cnst_get_ind('CLDLIQ', ixcldliq)
+     call cnst_get_ind('CLDICE', ixcldice)
+     qini     (:ncol,:pver) = state%q(:ncol,:pver,       1)
+     cldliqini(:ncol,:pver) = state%q(:ncol,:pver,ixcldliq)
+     cldiceini(:ncol,:pver) = state%q(:ncol,:pver,ixcldice)
+  end do
 
   !-----------------------------------------------------------------------------
   ! Neural network
