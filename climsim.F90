@@ -107,11 +107,12 @@ contains
    lq(1)        = .TRUE. ! water vapor
    lq(ixcldliq) = .TRUE. ! cloud liquid
    lq(ixcldice) = .TRUE. ! cloud ice
-   call physics_ptend_init(ptend, state%psetcols, 'neural-net', ! Initialize local physics_ptend object
-                           ls=.true.,
-                           lq=lq,
-                           lu=.true.,
-                           lv=.true.)
+   call physics_ptend_init(ptend, state%psetcols, 'neural-net', & ! Initialize local physics_ptend object
+                           ls=.true., &
+                           lq=lq,     &
+                           lu=.true., &
+                           lv=.true.  &
+                          )
 
    do_constraints = .true.
    
