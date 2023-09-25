@@ -818,7 +818,7 @@ subroutine climsim_driver(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out
   ! (currently spin up time is set at 86400 sec ~ 1 day)
   ! [TO-DO] create a namelist variable for mmf spin-up time
   nstep_NN = 86400 / get_step_size()
-  if (nstep-nstep0 .ge. nstep_NN) then
+  if (nstep-nstep0 .gt. nstep_NN) then
      do_climsim_inference = .true.
   end if
 

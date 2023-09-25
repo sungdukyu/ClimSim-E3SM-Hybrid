@@ -87,7 +87,8 @@ contains
    real(r8) :: input(pcols,inputlength)
    real(r8) :: output(pcols,outputlength)
    integer :: i,k,ncol,ixcldice,ixcldliq,ii,kk,idx_trop,kens
-   real (r8) :: s_bctend(pcols,pver), q_bctend(pcols,pver), qc_bctend(pcols,pver), qi_bctend(pcols,pver), qafter, safter
+   real (r8) :: s_bctend(pcols,pver), q_bctend(pcols,pver), qc_bctend(pcols,pver), qi_bctend(pcols,pver), qafter, safter, &
+                u_bctend(pcols,pver), v_bctend(pcols,pver)
    logical :: do_constraints
    logical :: lq(pcnst)
    real(r8) ::rh_loc
@@ -106,14 +107,20 @@ contains
    lq(1)        = .TRUE. ! water vapor
    lq(ixcldliq) = .TRUE. ! cloud liquid
    lq(ixcldice) = .TRUE. ! cloud ice
-   call physics_ptend_init(ptend, state%psetcols, 'neural-net', ls=.true.,lq=lq)   ! Initialize local physics_ptend object
+   call physics_ptend_init(ptend, state%psetcols, 'neural-net', ! Initialize local physics_ptend object
+                           ls=.true.,
+                           lq=lq,
+                           lu=.true.,
+                           lv=.true.)
 
    do_constraints = .true.
    
-   s_bctend(:,:) = 0.
-   q_bctend(:,:) = 0.
+   s_bctend(:,:)  = 0.
+   q_bctend(:,:)  = 0.
    qc_bctend(:,:) = 0.
    qi_bctend(:,:) = 0.
+   u_bctend(:,:)  = 0.
+   v_bctend(:,:)  = 0.
 
    ! Associate pointers with pbuf fields
    call pbuf_get_field(pbuf, pbuf_get_index('LHFLX'), lhflx)
@@ -298,6 +305,8 @@ end if
    q_bctend (:ncol,1:pver) = output(1:ncol,1*pver+1:2*pver)       ! kg/kg/s 
    qc_bctend(:ncol,1:pver) = output(1:ncol,2*pver+1:3*pver)       ! kg/kg/s 
    qi_bctend(:ncol,1:pver) = output(1:ncol,3*pver+1:4*pver)       ! kg/kg/s 
+   u_bctend (:ncol,1:pver) = output(1:ncol,4*pver+1:5*pver)       ! m/s/s
+   v_bctend (:ncol,1:pver) = output(1:ncol,5*pver+1:6*pver)       ! m/s/s
 
 ! deny any moisture activity in the stratosphere:
    do i=1,ncol
@@ -349,10 +358,11 @@ end if
    endif
 ! Wire to ptend:
     ptend%s(:ncol,:pver) = s_bctend(:ncol,:pver)
-    ptend%q(:ncol,:pver,1) = q_bctend(:ncol,:pver)
+    ptend%q(:ncol,:pver,1)        = q_bctend(:ncol,:pver)
     ptend%q(:ncol,:pver,ixcldliq) = qc_bctend(:ncol,:pver)
     ptend%q(:ncol,:pver,ixcldice) = qi_bctend(:ncol,:pver)
-
+    ptend%u(:ncol,:pver) = u_bctend(:ncol,:pver)
+    ptend%v(:ncol,:pver) = v_bctend(:ncol,:pver)
 
 ! ------------- 2. NN output to land forcing ---------
 !!! Sungduk: these are original version.
