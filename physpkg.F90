@@ -845,10 +845,6 @@ subroutine climsim_driver(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out
      ! state,tend,cam_out,pbuf2d = <...>_save
      call phys_run1_NN(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out,&
                        solin, coszrs)
-     do lchnk=begchunk, endchunk
-        call physics_update(phys_state(lchnk), ptend(lchnk), ztodt, phys_tend(lchnk))
-        ! call check_energy_chng
-     end do
   end if
 
   !-----------------------------------------------------------------------------
