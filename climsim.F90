@@ -1,6 +1,6 @@
 #ifdef CLIMSIM
 !#define RHDEBUG
-!#define CBRAIN_OCN_ONLY
+!#define CLIMSIM_OCN_ONLY
 
 module climsim
 
@@ -44,7 +44,7 @@ use mod_network, only: network_type
 
   character(len=256) :: cb_nn_var_combo = 'v2'
 
-  type(network_type), allocatable :: cloudbrain_net(:)
+  type(network_type), allocatable :: climsim_net(:)
   real(r8), allocatable :: inp_sub(:)
   real(r8), allocatable :: inp_div(:)
   real(r8), allocatable :: out_scale(:)
@@ -61,7 +61,7 @@ use mod_network, only: network_type
   integer, allocatable :: ens_ind_shuffled(:)
   logical :: cb_do_random_ensemble = .false.
 
-  public neural_net, init_neural_net, cbrain_readnl, &
+  public neural_net, init_neural_net, climsim_readnl, &
          cb_partial_coupling, cb_partial_coupling_vars
   
 contains
@@ -73,9 +73,9 @@ contains
 
    type(physics_ptend),intent(out)    :: ptend 
    type(physics_state), intent(in)    :: state
-   type(physics_buffer_desc), pointer :: pbuf(:)  ! SY: for precip variables.
+   type(physics_buffer_desc), pointer :: pbuf(:)  
    type(cam_in_t),intent(in)          :: cam_in
-   type(cam_out_t),     intent(inout) :: cam_out  ! SY: changed to inout to use variables from a previous time step (e.g., PRECT)
+   type(cam_out_t),     intent(inout) :: cam_out 
    real(r8), intent(in)               :: coszrs(pcols)
    real(r8), intent(in)               :: solin(pcols)
    real(r8), intent(in)               :: ztodt
@@ -186,46 +186,46 @@ end select
 
 ! Tue Jan 24 13:28:43 CST 2023
 ! Sungduk 
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
 if (masterproc) then ! (logging ncol=1 only)
 select case (to_lower(trim(cb_nn_var_combo)))
    case('v2')
-      write (iulog,*) 'BRAINDEBUG state_t = ', state%t(1:ncol,1:pver)          ! state_t
-      write (iulog,*) 'BRAINDEBUG state_q0001 = ', state%q(1:ncol,1:pver,1)        ! state_q0001
-      write (iulog,*) 'BRAINDEBUG state_q0002 = ', state%q(1:ncol,1:pver,ixcldliq) ! state_q0002
-      write (iulog,*) 'BRAINDEBUG state_q0003 = ', state%q(1:ncol,1:pver,ixcldice) ! state_q0003
-      write (iulog,*) 'BRAINDEBUG state_u = ', state%u(1:ncol,1:pver)          ! state_u
-      write (iulog,*) 'BRAINDEBUG state_v = ', state%v(1:ncol,1:pver)          ! state_v
-      write (iulog,*) 'BRAINDEBUG state_ps = ', state%ps(1:ncol)                ! state_ps
-      write (iulog,*) 'BRAINDEBUG pbuf_SOLIN = ', solin(1:ncol)                   ! pbuf_SOLIN
-      write (iulog,*) 'BRAINDEBUG pbuf_LHFLX = ', lhflx(1:ncol)                   ! pbuf_LHFLX
-      write (iulog,*) 'BRAINDEBUG pbuf_SHFLX = ', shflx(1:ncol)                   ! pbuf_SHFLX
-      write (iulog,*) 'BRAINDEBUG pbuf_TAUX = ', taux(1:ncol)                    ! pbuf_TAUX
-      write (iulog,*) 'BRAINDEBUG pbuf_TAUY = ', tauy(1:ncol)                    ! pbuf_TAUY
-      write (iulog,*) 'BRAINDEBUG pbuf_COSZRS = ', coszrs(1:ncol)                  ! pbuf_COSZRS
-      write (iulog,*) 'BRAINDEBUG cam_in_ALDIF = ', cam_in%ALDIF(:ncol)             ! cam_in_ALDIF
-      write (iulog,*) 'BRAINDEBUG cam_in_ALDIR = ', cam_in%ALDIR(:ncol)             ! cam_in_ALDIR
-      write (iulog,*) 'BRAINDEBUG cam_in_ASDIF = ', cam_in%ASDIF(:ncol)             ! cam_in_ASDIF
-      write (iulog,*) 'BRAINDEBUG cam_in_ASDIR = ', cam_in%ASDIR(:ncol)             ! cam_in_ASDIR
-      write (iulog,*) 'BRAINDEBUG cam_in_LWUP = ', cam_in%LWUP(:ncol)              ! cam_in_LWUP
-      write (iulog,*) 'BRAINDEBUG cam_in_ICEFRAC = ', cam_in%ICEFRAC(:ncol)           ! cam_in_ICEFRAC
-      write (iulog,*) 'BRAINDEBUG cam_in_LANDFRAC = ', cam_in%LANDFRAC(:ncol)          ! cam_in_LANDFRAC
-      write (iulog,*) 'BRAINDEBUG cam_in_OCNFRAC = ', cam_in%OCNFRAC(:ncol)           ! cam_in_OCNFRAC
-      write (iulog,*) 'BRAINDEBUG cam_in_SNOWHICE = ', cam_in%SNOWHICE(:ncol)          ! cam_in_SNOWHICE
-      write (iulog,*) 'BRAINDEBUG cam_in_SNOWHLAND = ', cam_in%SNOWHLAND(:ncol)         ! cam_in_SNOWHLAND
-      write (iulog,*) 'BRAINDEBUG pbuf_ozone = ', ozone(:ncol,6:21)           ! pbuf_ozone
-      write (iulog,*) 'BRAINDEBUG pbuf_CH4 = ', ch4(:ncol,6:21)             ! pbuf_CH4
-      write (iulog,*) 'BRAINDEBUG pbuf_N2O = ', n2o(:ncol,6:21)             ! pbuf_N2O
+      write (iulog,*) 'CLIMSIMDEBUG state_t = ', state%t(1:ncol,1:pver)          ! state_t
+      write (iulog,*) 'CLIMSIMDEBUG state_q0001 = ', state%q(1:ncol,1:pver,1)        ! state_q0001
+      write (iulog,*) 'CLIMSIMDEBUG state_q0002 = ', state%q(1:ncol,1:pver,ixcldliq) ! state_q0002
+      write (iulog,*) 'CLIMSIMDEBUG state_q0003 = ', state%q(1:ncol,1:pver,ixcldice) ! state_q0003
+      write (iulog,*) 'CLIMSIMDEBUG state_u = ', state%u(1:ncol,1:pver)          ! state_u
+      write (iulog,*) 'CLIMSIMDEBUG state_v = ', state%v(1:ncol,1:pver)          ! state_v
+      write (iulog,*) 'CLIMSIMDEBUG state_ps = ', state%ps(1:ncol)                ! state_ps
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_SOLIN = ', solin(1:ncol)                   ! pbuf_SOLIN
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_LHFLX = ', lhflx(1:ncol)                   ! pbuf_LHFLX
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_SHFLX = ', shflx(1:ncol)                   ! pbuf_SHFLX
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_TAUX = ', taux(1:ncol)                    ! pbuf_TAUX
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_TAUY = ', tauy(1:ncol)                    ! pbuf_TAUY
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_COSZRS = ', coszrs(1:ncol)                  ! pbuf_COSZRS
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_ALDIF = ', cam_in%ALDIF(:ncol)             ! cam_in_ALDIF
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_ALDIR = ', cam_in%ALDIR(:ncol)             ! cam_in_ALDIR
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_ASDIF = ', cam_in%ASDIF(:ncol)             ! cam_in_ASDIF
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_ASDIR = ', cam_in%ASDIR(:ncol)             ! cam_in_ASDIR
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_LWUP = ', cam_in%LWUP(:ncol)              ! cam_in_LWUP
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_ICEFRAC = ', cam_in%ICEFRAC(:ncol)           ! cam_in_ICEFRAC
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_LANDFRAC = ', cam_in%LANDFRAC(:ncol)          ! cam_in_LANDFRAC
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_OCNFRAC = ', cam_in%OCNFRAC(:ncol)           ! cam_in_OCNFRAC
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_SNOWHICE = ', cam_in%SNOWHICE(:ncol)          ! cam_in_SNOWHICE
+      write (iulog,*) 'CLIMSIMDEBUG cam_in_SNOWHLAND = ', cam_in%SNOWHLAND(:ncol)         ! cam_in_SNOWHLAND
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_ozone = ', ozone(:ncol,6:21)           ! pbuf_ozone
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_CH4 = ', ch4(:ncol,6:21)             ! pbuf_CH4
+      write (iulog,*) 'CLIMSIMDEBUG pbuf_N2O = ', n2o(:ncol,6:21)             ! pbuf_N2O
       if (input_rh) then ! relative humidity conversion for input
-         write (iulog,*) 'BRAINDEBUG RH = ', input(:ncol,1*pver+1:2*pver) ! relhum 
+         write (iulog,*) 'CLIMSIMDEBUG RH = ', input(:ncol,1*pver+1:2*pver) ! relhum 
       end if
 end select
 end if
 #endif 
 
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
       if (masterproc) then
-        write (iulog,*) 'BRAINDEBUG input pre norm=',input(1,:)
+        write (iulog,*) 'CLIMSIMDEBUG input pre norm=',input(1,:)
       endif
 #endif
 
@@ -233,9 +233,9 @@ end if
     do k=1,inputlength
       input(:ncol,k) = (input(:ncol,k) - inp_sub(k))/inp_div(k)
     end do
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
       if (masterproc) then
-        write (iulog,*) 'BRAINDEBUG input post norm=',input(1,:)
+        write (iulog,*) 'CLIMSIMDEBUG input post norm=',input(1,:)
       endif
 #endif
 
@@ -246,27 +246,27 @@ end if
         if (cb_do_random_ensemble) then
           ens_ind_shuffled = shuffle_1d(ens_ind_shuffled) ! randomly shuffle ens indices
           do kens = 1,cb_random_ens_size
-            output(i,:) = output(i,:) +  (1._r8/cb_random_ens_size) * cloudbrain_net(ens_ind_shuffled(kens)) % output(input(i,:))
+            output(i,:) = output(i,:) +  (1._r8/cb_random_ens_size) * climsim_net(ens_ind_shuffled(kens)) % output(input(i,:))
           enddo
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
           if (masterproc .and. i.eq.1) then
-            write (iulog,*) 'BRAINDEBUG  random ensemble model IDs = ',ens_ind_shuffled(1:cb_random_ens_size)
+            write (iulog,*) 'CLIMSIMDEBUG  random ensemble model IDs = ',ens_ind_shuffled(1:cb_random_ens_size)
           endif
 #endif
         !! All ensemble averaging
         else
           do kens = 1,cb_ens_size
-            output(i,:) = output(i,:) +  (1._r8/cb_ens_size) * cloudbrain_net(kens) % output(input(i,:))
+            output(i,:) = output(i,:) +  (1._r8/cb_ens_size) * climsim_net(kens) % output(input(i,:))
           enddo
         endif
       !! Using a single model
       else ! cb_do_ensemble
-        output(i,:) = cloudbrain_net(1) % output(input(i,:))
+        output(i,:) = climsim_net(1) % output(input(i,:))
       endif
     end do
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
       if (masterproc) then
-        write (iulog,*) 'BRAINDEBUG output = ',output(1,:)
+        write (iulog,*) 'CLIMSIMDEBUG output = ',output(1,:)
       endif
 #endif
 
@@ -282,9 +282,9 @@ end if
      output(i,k) = max(output(i,k), tiny(output(i,k))) ! flwds
                                                        ! preventing flwds==0 error
    end do
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
       if (masterproc) then
-        write (iulog,*) 'BRAINDEBUG output after ReLU = ',output(1,:)
+        write (iulog,*) 'CLIMSIMDEBUG output after ReLU = ',output(1,:)
       endif
 #endif
 
@@ -294,9 +294,9 @@ end if
       output(i,k) = output(i,k) / out_scale(k)
      end do
    end do
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
       if (masterproc) then
-        write (iulog,*) 'BRAINDEBUG output post scale = ',output(1,:)
+        write (iulog,*) 'CLIMSIMDEBUG output post scale = ',output(1,:)
       endif
 #endif
 
@@ -335,7 +335,7 @@ end if
        safter = state%s(i,k) + s_bctend(i,k)*ztodt ! predicted DSE after NN tendency
        if (safter .lt. 0.) then ! can only happen when bctend < 0...
          s_bctend(i,k) = s_bctend(i,k) + abs(safter)/ztodt ! in which case reduce cooling rate
-         write (iulog,*) 'HEY CBRAIN made a negative absolute temperature, corrected but BEWARE!!!'
+         write (iulog,*) 'HEY CLIMSIM made a negative absolute temperature, corrected but BEWARE!!!'
        endif
 
  ! vapor positivity:
@@ -358,25 +358,16 @@ end if
    end do
    endif
 ! Wire to ptend:
-    ptend%s(:ncol,:pver) = s_bctend(:ncol,:pver)
+    ptend%s(:ncol,:pver)          = s_bctend(:ncol,:pver)
     ptend%q(:ncol,:pver,1)        = q_bctend(:ncol,:pver)
     ptend%q(:ncol,:pver,ixcldliq) = qc_bctend(:ncol,:pver)
     ptend%q(:ncol,:pver,ixcldice) = qi_bctend(:ncol,:pver)
-    ptend%u(:ncol,:pver) = u_bctend(:ncol,:pver)
-    ptend%v(:ncol,:pver) = v_bctend(:ncol,:pver)
+    ptend%u(:ncol,:pver)          = u_bctend(:ncol,:pver)
+    ptend%v(:ncol,:pver)          = v_bctend(:ncol,:pver)
 
 ! ------------- 2. NN output to land forcing ---------
-!!! Sungduk: these are original version.
-!!!          It works, but I wrote it again to add 'ocean only coupling' option
-!!!          (#CBRAIN_OCN_ONLY)
-!!! ! ['PRECT','PREC_CRM_SNOW','PREC_CRM','NN2L_FLWDS','NN2L_DOWN_SW','NN2L_SOLL','NN2L_SOLLD','NN2L_SOLS','NN2L_SOLSD']
-!!!    ! These are the cam_out members that are not assigned in cam_export
-!!!    cam_out%flwds = output(:ncol,4*pvert+3)
-!!!    cam_out%netsw = output(:ncol,4*pvert+4)
-!!!    cam_out%soll  = output(:ncol,4*pvert+5)
-!!!    cam_out%solld = output(:ncol,4*pvert+6)
-!!!    cam_out%sols  = output(:ncol,4*pvert+7)
-!!!    cam_out%solsd = output(:ncol,4*pvert+8)
+!!! Sungduk: It works, but I wrote it again to add 'ocean only coupling' option
+!!!          (#CLIMSIM_OCN_ONLY)
 !!! 
 !!!    ! These are the cam_out members that are assigned in cam_export: prec_dp, snow_dp,
 !!!    ! and so saved to pbuf, instead.
@@ -391,7 +382,7 @@ end if
    do i = 1,ncol
 ! SY: debugging
 !     allowing surface coupling over ocean only
-#ifdef CBRAIN_OCN_ONLY 
+#ifdef CLIMSIM_OCN_ONLY 
      if (cam_in%ocnfrac(i) .eq. 1.0_r8) then
 #endif
        cam_out%netsw(i) = output(i,6*pver+1)
@@ -402,7 +393,7 @@ end if
        cam_out%soll(i)  = output(i,6*pver+6)
        cam_out%solsd(i) = output(i,6*pver+7)
        cam_out%solld(i) = output(i,6*pver+8)
-#ifdef CBRAIN_OCN_ONLY
+#ifdef CLIMSIM_OCN_ONLY
      end if
 #endif
    end do 
@@ -421,16 +412,16 @@ end subroutine neural_net
     
     ! ens-mean inference
     if (cb_do_ensemble) then
-       write (iulog,*) 'CLOUDBRAIN: Ensemble is turned on with Ensemble size  ', cb_ens_size
-       allocate(cloudbrain_net (cb_ens_size))
+       write (iulog,*) 'CLIMSIM: Ensemble is turned on with Ensemble size  ', cb_ens_size
+       allocate(climsim_net (cb_ens_size))
        do i = 1,cb_ens_size
-          call cloudbrain_net(i) %load(cb_ens_fkb_model_list(i))
-          write (iulog,*) 'CLOUDBRAIN: Ensemble fkb model (', i, ') : ', trim(cb_ens_fkb_model_list(i))
+          call climsim_net(i) %load(cb_ens_fkb_model_list(i))
+          write (iulog,*) 'CLIMSIM: Ensemble fkb model (', i, ') : ', trim(cb_ens_fkb_model_list(i))
        enddo
 
        ! random ensemble
        if (cb_random_ens_size .ge. 1) then
-          write (iulog,*) 'CLOUDBRAIN: Random ensemble averaging with N = ', cb_random_ens_size
+          write (iulog,*) 'CLIMSIM: Random ensemble averaging with N = ', cb_random_ens_size
           if (cb_random_ens_size .le. cb_ens_size) then
              allocate(ens_ind_shuffled(cb_ens_size))
              ens_ind_shuffled = (/ (k, k=1, cb_ens_size) /)
@@ -443,10 +434,10 @@ end subroutine neural_net
 
     ! single model inference
     else
-       allocate(cloudbrain_net (1))
-       call cloudbrain_net(1) %load(cb_fkb_model)
+       allocate(climsim_net (1))
+       call climsim_net(1) %load(cb_fkb_model)
        if (masterproc) then
-          write (iulog,*) 'CLOUDBRAIN: loaded network from txt file, ', trim(cb_fkb_model)
+          write (iulog,*) 'CLIMSIM: loaded network from txt file, ', trim(cb_fkb_model)
        endif
     endif
 
@@ -454,28 +445,28 @@ end subroutine neural_net
     read(555,*) inp_sub(:)
     close (555)
     if (masterproc) then
-       write (iulog,*) 'CLOUDBRAIN: loaded input subtraction factors from: ', trim(cb_inp_sub)
+       write (iulog,*) 'CLIMSIM: loaded input subtraction factors from: ', trim(cb_inp_sub)
     endif
 
     open (unit=555,file=cb_inp_div,status='old',action='read')
     read(555,*) inp_div(:)
     close (555)
     if (masterproc) then
-       write (iulog,*) 'CLOUDBRAIN: loaded input division factors from: ', trim(cb_inp_div)
+       write (iulog,*) 'CLIMSIM: loaded input division factors from: ', trim(cb_inp_div)
     endif
 
     open (unit=555,file=cb_out_scale,status='old',action='read')
     read(555,*) out_scale(:)
     close (555)
     if (masterproc) then
-       write (iulog,*) 'CLOUDBRAIN: loaded output scale factors from: ', trim(cb_out_scale)
+       write (iulog,*) 'CLIMSIM: loaded output scale factors from: ', trim(cb_out_scale)
     endif
 
-#ifdef BRAINDEBUG
+#ifdef CLIMSIMDEBUG
     if (masterproc) then
-       write (iulog,*) 'BRAINDEBUG read input norm inp_sub=', inp_sub(:)
-       write (iulog,*) 'BRAINDEBUG read input norm inp_div=', inp_div(:)       
-       write (iulog,*) 'BRAINDEBUG read output norm out_scale=', out_scale(:)       
+       write (iulog,*) 'CLIMSIMDEBUG read input norm inp_sub=', inp_sub(:)
+       write (iulog,*) 'CLIMSIMDEBUG read input norm inp_div=', inp_div(:)       
+       write (iulog,*) 'CLIMSIMDEBUG read output norm out_scale=', out_scale(:)       
     endif
 #endif
 
@@ -568,7 +559,7 @@ end subroutine neural_net
   end subroutine detect_tropopause
 
   ! Read namelist variables.
-  subroutine cbrain_readnl(nlfile)
+  subroutine climsim_readnl(nlfile)
 
       use namelist_utils,  only: find_group_name
       use units,           only: getunit, freeunit
@@ -578,9 +569,9 @@ end subroutine neural_net
 
       ! Local variables
       integer :: unitn, ierr, f
-      character(len=*), parameter :: subname = 'cbrain_readnl'
+      character(len=*), parameter :: subname = 'climsim_readnl'
       
-      namelist /cbrain_nl/ inputlength, outputlength, input_rh, &
+      namelist /climsim_nl/ inputlength, outputlength, input_rh, &
                            cb_fkb_model, &
                            cb_inp_sub, cb_inp_div, cb_out_scale, &
                            cb_partial_coupling, cb_partial_coupling_vars,&
@@ -604,9 +595,9 @@ end subroutine neural_net
       if (masterproc) then
          unitn = getunit()
          open( unitn, file=trim(nlfile), status='old' )
-         call find_group_name(unitn, 'cbrain_nl', status=ierr)
+         call find_group_name(unitn, 'climsim_nl', status=ierr)
          if (ierr == 0) then
-            read(unitn, cbrain_nl, iostat=ierr)
+            read(unitn, climsim_nl, iostat=ierr)
             if (ierr /= 0) then
                call endrun(subname // ':: ERROR reading namelist')
             end if
@@ -638,7 +629,7 @@ end subroutine neural_net
       ! end if
 #endif
 
-   end subroutine cbrain_readnl
+   end subroutine climsim_readnl
 
   function shuffle_1d(array_1d) result(array_shuffled)
   ! Shuffling the entries of 1-d INTEGER array
