@@ -1,7 +1,3 @@
-#ifdef CLIMSIM
-!#define RHDEBUG
-!#define CLIMSIM_OCN_ONLY
-
 module climsim
 
 use constituents,    only: pcnst
@@ -655,4 +651,3 @@ end subroutine neural_net
   end function shuffle_1d
 
 end module climsim
-#endif
