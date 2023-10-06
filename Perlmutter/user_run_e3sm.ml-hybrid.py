@@ -12,7 +12,7 @@ newcase,config,build,clean,submit,continue_run = False,False,False,False,False,F
 
 acct = 'm4331'
 
-case_prefix = 'E3SM_CLIMSIM-test-SEP21-take2'
+case_prefix = 'E3SM_CLIMSIM-test-SEP26-1'
 # Added extra physics_state and cam_out variables.
 
 top_dir  = os.getenv('HOME')+'/repositories'
@@ -20,7 +20,7 @@ scratch_dir = os.getenv('SCRATCH')
 case_dir = scratch_dir+'/e3sm_mlt_scratch/'
 src_dir  = top_dir+'/E3SM_sungdukyu/' # branch => whannah/mmf/ml-training
 # user_cpp = '-DMMF_ML_TRAINING' # for saving ML variables
-user_cpp = '-DCLIMSIM -DBRAINDEBUG -DMMF_ML_TRAINING' # NN hybrid test
+user_cpp = '-DCLIMSIM -DCLIMSIMDEBUG -DMMF_ML_TRAINING' # NN hybrid test
 src_mod_atm_dir = '/global/homes/s/sungduk/repositories/ClimSim-E3SM-Hybrid/'
 
 # clean        = True
@@ -36,7 +36,7 @@ debug_mode = False
 dtime = 1200 # set to 0 to use a default value 
 
 # stop_opt,stop_n,resub,walltime = 'nmonths',1, 1, '00:30:00'
-stop_opt,stop_n,resub,walltime = 'ndays',10, 0,'0:30:00'
+stop_opt,stop_n,resub,walltime = 'ndays',30, 0,'0:30:00'
 
 ne,npg=4,2;  num_nodes=2  ; grid=f'ne{ne}pg{npg}_ne{ne}pg{npg}'
 # ne,npg=30,2; num_nodes=32 ; grid=f'ne{ne}pg{npg}_ne{ne}pg{npg}'
@@ -105,7 +105,7 @@ state_debug_checks = .true.
 do_aerosol_rad = .false.
 /
 
-&cbrain_nl
+&climsim_nl
 inputlength     = 425
 outputlength    = 368
 cb_nn_var_combo = 'v2'
