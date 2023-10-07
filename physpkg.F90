@@ -863,12 +863,6 @@ subroutine climsim_driver(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out
      call phys_run1(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out)
 
   else  ! NN inference
-<<<<<<< HEAD
-     ! state,tend,cam_out,pbuf2d = <...>_save
-     call phys_run1_NN(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out,&
-                       solin, coszrs)
-  end if
-=======
      if (cb_partial_coupling) then ! NN partial coupling
 
 #ifdef CLIMSIM_DIAG_PARTIAL
@@ -1041,7 +1035,6 @@ subroutine climsim_driver(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out
 #endif
   end if ! (cb_partial coupling)
 
->>>>>>> sungdukyu/partial_coupling
 
   !-----------------------------------------------------------------------------
   ! phys_run1 closing
