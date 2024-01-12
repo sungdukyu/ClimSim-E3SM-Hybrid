@@ -507,6 +507,7 @@ subroutine phys_init( phys_state, phys_tend, pbuf2d, cam_out )
   !-----------------------------------------------------------------------------
   ! Purpose: Initialization of physics package
   !-----------------------------------------------------------------------------
+  use climsim,            only: init_neural_net
   use physics_buffer,     only: physics_buffer_desc, pbuf_initialize, pbuf_get_index
   use physconst,          only: rair, cpair, gravit, stebol, tmelt, &
                                 latvap, latice, rh2o, rhoh2o, pstd, zvir, &
@@ -553,6 +554,7 @@ subroutine phys_init( phys_state, phys_tend, pbuf2d, cam_out )
   use modal_aero_wateruptake,only: modal_aero_wateruptake_init
   use nucleate_ice_cam,      only: nucleate_ice_cam_init
   use hetfrz_classnuc_cam,   only: hetfrz_classnuc_cam_init
+
   !-----------------------------------------------------------------------------
   ! Input/output arguments
   !-----------------------------------------------------------------------------
@@ -688,6 +690,9 @@ subroutine phys_init( phys_state, phys_tend, pbuf2d, cam_out )
  !BSINGH - addfld and adddefault calls for perturb growth testing    
   if(pergro_test_active)call add_fld_default_calls()
 
+  ! CLIMSIM
+  call init_neural_net()
+
 end subroutine phys_init
 
 !===================================================================================================
@@ -697,8 +702,7 @@ subroutine climsim_driver(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out
   !-----------------------------------------------------------------------------
   ! Purpose: climsim driver
   !-----------------------------------------------------------------------------
-  use climsim,          only: init_neural_net, &
-                              cb_partial_coupling, cb_partial_coupling_vars
+  use climsim,          only: cb_partial_coupling, cb_partial_coupling_vars
   use physics_buffer,   only: physics_buffer_desc, pbuf_get_chunk, &
                               pbuf_allocate, pbuf_get_index, pbuf_get_field
   use time_manager,     only: get_nstep, get_step_size, & 
@@ -826,7 +830,7 @@ subroutine climsim_driver(phys_state, ztodt, phys_tend, pbuf2d,  cam_in, cam_out
   ! Call init subroutine for neural networks
   ! (loading neural network weights and normalization factors)
   if (is_first_step() .or. is_first_restart_step()) then
-      call init_neural_net()
+      ! call init_neural_net()
      nstep0 = nstep
   end if
 

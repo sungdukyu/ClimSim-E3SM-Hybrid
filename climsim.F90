@@ -3,7 +3,7 @@ module climsim
 use constituents,    only: pcnst
 use shr_kind_mod,    only: r8 => shr_kind_r8
 use ppgrid,          only: pcols, pver, pverp
-use cam_history,     only: outfld, addfld, add_default
+use cam_history,     only: outfld, addfld, horiz_only
 use physconst,       only: gravit,cpair,latvap,latice
 use spmd_utils,      only: masterproc,iam
 use camsrfexch,      only: cam_out_t, cam_in_t
@@ -14,6 +14,7 @@ use physics_buffer,  only: physics_buffer_desc, pbuf_get_field, pbuf_get_index
 use cam_history_support, only: pflds, fieldname_lenp2
 use cam_abortutils,  only: endrun
 use string_utils,    only: to_lower
+use phys_grid,       only: get_lat_p, get_lon_p, get_rlat_p, get_rlon_p
 
 !-------- NEURAL-FORTRAN (FKB) --------
 ! use mod_kinds, only: ik, rk
@@ -37,8 +38,7 @@ use mod_network, only: network_type
   character(len=256)    :: cb_out_scale   ! absolute filepath for a out_scale.txt
   logical :: cb_partial_coupling  = .false.
   character(len=fieldname_lenp2) :: cb_partial_coupling_vars(pflds)
-
-  character(len=256) :: cb_nn_var_combo = 'v2'
+  character(len=256) :: cb_nn_var_combo = 'v2' ! nickname for a specific NN in/out variable combination
 
   type(network_type), allocatable :: climsim_net(:)
   real(r8), allocatable :: inp_sub(:)
@@ -56,6 +56,8 @@ use mod_network, only: network_type
   ! local
   integer, allocatable :: ens_ind_shuffled(:)
   logical :: cb_do_random_ensemble = .false.
+  logical :: cb_top_levels_zero_out = .true.
+  integer :: cb_n_levels_zero = 12 ! top n levels to zero out
 
   public neural_net, init_neural_net, climsim_readnl, &
          cb_partial_coupling, cb_partial_coupling_vars
@@ -82,7 +84,7 @@ contains
    ! local variables
    real(r8) :: input(pcols,inputlength)
    real(r8) :: output(pcols,outputlength)
-   integer :: i,k,ncol,ixcldice,ixcldliq,ii,kk,idx_trop,kens
+   integer :: i,k,ncol,ixcldice,ixcldliq,ii,kk,idx_trop(pcols),kens
    real (r8) :: s_bctend(pcols,pver), q_bctend(pcols,pver), qc_bctend(pcols,pver), qi_bctend(pcols,pver), qafter, safter, &
                 u_bctend(pcols,pver), v_bctend(pcols,pver)
    logical :: do_constraints
@@ -299,19 +301,20 @@ end if
 ! ---------- 1. NN output to atmosphere forcing --------
 ! ['TBCTEND', 'QBCTEND','CLDLIQBCTEND','CLDICEBCTEND']
    s_bctend (:ncol,1:pver) = output(1:ncol,0*pver+1:1*pver)*cpair ! K/s --> J/kg/s (ptend expects that)
-   q_bctend (:ncol,1:pver) = output(1:ncol,1*pver+1:2*pver)       ! kg/kg/s 
-   qc_bctend(:ncol,1:pver) = output(1:ncol,2*pver+1:3*pver)       ! kg/kg/s 
-   qi_bctend(:ncol,1:pver) = output(1:ncol,3*pver+1:4*pver)       ! kg/kg/s 
+   q_bctend (:ncol,1:pver) = output(1:ncol,1*pver+1:2*pver)       ! kg/kg/s
+   qc_bctend(:ncol,1:pver) = output(1:ncol,2*pver+1:3*pver)       ! kg/kg/s
+   qi_bctend(:ncol,1:pver) = output(1:ncol,3*pver+1:4*pver)       ! kg/kg/s
    u_bctend (:ncol,1:pver) = output(1:ncol,4*pver+1:5*pver)       ! m/s/s
    v_bctend (:ncol,1:pver) = output(1:ncol,5*pver+1:6*pver)       ! m/s/s
 
 ! deny any moisture activity in the stratosphere:
    do i=1,ncol
-     call detect_tropopause(state%t(i,:),state%exner(i,:),state%zm(i,:),state%pmid(i,:),idx_trop)
-     q_bctend(i,1:idx_trop) = 0.
-     qc_bctend(i,1:idx_trop) = 0.
-     qi_bctend(i,1:idx_trop) = 0.
+     call detect_tropopause(state%t(i,:),state%exner(i,:),state%zm(i,:),state%pmid(i,:),idx_trop(i))
+     q_bctend (i,1:idx_trop(i)) = 0.
+     qc_bctend(i,1:idx_trop(i)) = 0.
+     qi_bctend(i,1:idx_trop(i)) = 0.
    end do
+   call outfld('TROP_IND', idx_trop(:ncol)*1._r8, ncol, state%lchnk)
 
 ! -- atmos positivity constraints ---- 
    if (do_constraints) then
@@ -332,23 +335,27 @@ end if
        if (safter .lt. 0.) then ! can only happen when bctend < 0...
          s_bctend(i,k) = s_bctend(i,k) + abs(safter)/ztodt ! in which case reduce cooling rate
          write (iulog,*) 'HEY CLIMSIM made a negative absolute temperature, corrected but BEWARE!!!'
+         write (iulog,*) '' ! [TODO] printout lat/lon and error magnitude
        endif
 
  ! vapor positivity:
        qafter = state%q(i,k,1) + q_bctend(i,k)*ztodt ! predicted vapor after NN tendency
        if (qafter .lt. 0.) then ! can only happen when qbctend < 0...
          q_bctend(i,k) = q_bctend(i,k) + abs(qafter)/ztodt ! in which case reduce drying rate
+         write (iulog,*) 'HEY CLIMSIM made a negative absolute q, corrected but BEWARE!!!'
        endif
 
  ! liquid positivity:
        qafter = state%q(i,k,ixcldliq) + qc_bctend(i,k)*ztodt ! predicted liquid after NN tendency
        if (qafter .lt. 0.) then ! can only happen when qbctend < 0...
          qc_bctend(i,k) = qc_bctend(i,k) + abs(qafter)/ztodt ! in which case reduce drying rate
+         write (iulog,*) 'HEY CLIMSIM made a negative absolute qc, corrected but BEWARE!!!'
        endif
 ! ice positivity:
        qafter = state%q(i,k,ixcldice) + qi_bctend(i,k)*ztodt ! predicted ice after NN tendency
        if (qafter .lt. 0.) then ! can only happen when qbctend < 0...
          qi_bctend(i,k) = qi_bctend(i,k) + abs(qafter)/ztodt ! in which case reduce drying rate
+         write (iulog,*) 'HEY CLIMSIM made a negative absolute qi, corrected but BEWARE!!!'
        endif
      end do
    end do
@@ -360,6 +367,16 @@ end if
     ptend%q(:ncol,:pver,ixcldice) = qi_bctend(:ncol,:pver)
     ptend%u(:ncol,:pver)          = u_bctend(:ncol,:pver)
     ptend%v(:ncol,:pver)          = v_bctend(:ncol,:pver)
+
+! for q{1,2,3}, u, v tendencies, top levels [1 to 12] are not coupled
+! no std dev except ptend%q1[1:3], whose magnitudes are smaller that other levels by orders of magnitude
+    if (cb_top_levels_zero_out) then
+      ptend%q(:ncol,1:cb_n_levels_zero,1)        = 0. 
+      ptend%q(:ncol,1:cb_n_levels_zero,ixcldliq) = 0. 
+      ptend%q(:ncol,1:cb_n_levels_zero,ixcldice) = 0. 
+      ptend%u(:ncol,1:cb_n_levels_zero)          = 0. 
+      ptend%v(:ncol,1:cb_n_levels_zero)          = 0. 
+    end if
 
 ! ------------- 2. NN output to land forcing ---------
 !!! Sungduk: It works, but I wrote it again to add 'ocean only coupling' option
@@ -465,6 +482,9 @@ end subroutine neural_net
        write (iulog,*) 'CLIMSIMDEBUG read output norm out_scale=', out_scale(:)       
     endif
 #endif
+
+  ! add diagnostic output fileds
+  call addfld ('TROP_IND',horiz_only,   'A', '1', 'lev index for tropopause')
 
   end subroutine init_neural_net
 
