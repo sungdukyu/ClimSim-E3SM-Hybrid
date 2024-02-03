@@ -279,6 +279,14 @@ end if
      k=4*pver+3
      output(i,k) = max(output(i,k), tiny(output(i,k))) ! flwds
                                                        ! preventing flwds==0 error
+     ! zero out surface solar fluxes when local time is at night
+     if (coszrs(i) .le. 0.) then
+       output(i,6*pver+1) = 0. ! netsw
+       output(i,6*pver+5) = 0. ! sols
+       output(i,6*pver+6) = 0. ! soll
+       output(i,6*pver+7) = 0. ! solsd
+       output(i,6*pver+8) = 0. ! solld
+     endif
    end do
 #ifdef CLIMSIMDEBUG
       if (masterproc) then
